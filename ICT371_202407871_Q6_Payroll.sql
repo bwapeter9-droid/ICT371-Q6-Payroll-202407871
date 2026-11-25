@@ -155,33 +155,47 @@ ANALYZE payroll;
 -- (g) SCHEDULED JOB [6]
 -- 02:00 on day 1 of each month, passing the FIRST DATE OF THE PREVIOUS MONTH.
 -- ---------------------------------------------------------------------
-CREATE EXTENSION IF NOT EXISTS pg_cron;
 
-SELECT cron.schedule('q6_monthly_payroll', '0 2 1 * *',
-       $$CALL q6_payroll.pr_process_payroll((date_trunc('month', CURRENT_DATE) - INTERVAL '1 month')::DATE)$$);
+-- Safe scheduling: runs only if pg_cron is available on this server.
+-- If it is not installed you will just see a NOTICE and the rest of the script still works.
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
+        CREATE EXTENSION IF NOT EXISTS pg_cron;
+        PERFORM cron.schedule('q6_monthly_payroll', '0 2 1 * *', $cmd$CALL q6_payroll.pr_process_payroll((date_trunc('month', CURRENT_DATE) - INTERVAL '1 month')::DATE)$cmd$);
+        RAISE NOTICE 'Job q6_monthly_payroll scheduled: 0 2 1 * *';
+    ELSE
+        RAISE NOTICE 'pg_cron is not installed on this server - job NOT scheduled. Schedule used: 0 2 1 * *';
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Could not schedule job (q6_monthly_payroll): %', SQLERRM;
+END
+$do$;
 
 -- Inspect the job:
-SELECT jobid, jobname, schedule, command, active FROM cron.job WHERE jobname = 'q6_monthly_payroll';
+-- Inspect job / history (uncomment where pg_cron is installed):
+-- SELECT jobid, jobname, schedule, command, active FROM cron.job WHERE jobname = 'q6_monthly_payroll';
 -- Inspect run history (shows status, return_message, start/end time):
-SELECT jobid, runid, status, return_message, start_time, end_time
-FROM   cron.job_run_details
-WHERE  jobid = (SELECT jobid FROM cron.job WHERE jobname = 'q6_monthly_payroll')
-ORDER  BY start_time DESC LIMIT 10;
+-- Inspect job / history (uncomment where pg_cron is installed):
+-- SELECT jobid, runid, status, return_message, start_time, end_time
+-- FROM   cron.job_run_details
+-- WHERE  jobid = (SELECT jobid FROM cron.job WHERE jobname = 'q6_monthly_payroll')
+-- ORDER  BY start_time DESC LIMIT 10;
 -- To remove the job:  SELECT cron.unschedule('q6_monthly_payroll');
 
 -- =====================================================================
 -- TESTS / EVIDENCE
 -- =====================================================================
-\echo '--- (a) Data ---'
+SELECT '--- (a) Data ---' AS section;
 SELECT * FROM employees ORDER BY employee_id;
 SELECT * FROM payroll ORDER BY pay_month, employee_id;
 
-\echo '--- (b) Function ---'
+SELECT '--- (b) Function ---' AS section;
 SELECT employee_id, fn_net_pay(employee_id) FROM employees ORDER BY employee_id;   -- 5200, 4150, 6200, 3600
 DO $$ BEGIN PERFORM fn_net_pay(999);
    EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'EXPECTED ERROR (unknown employee): %', SQLERRM; END $$;
 
-\echo '--- (c) Procedure ---'
+SELECT '--- (c) Procedure ---' AS section;
 DO $$ BEGIN CALL pr_process_payroll(DATE '2026-11-15');
    EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'EXPECTED ERROR (not month start): %', SQLERRM; END $$;
 
@@ -202,16 +216,16 @@ EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'EXPECTED ERROR (whole call fails): %', 
 SELECT COUNT(*) AS rows_for_current_month_must_be_0 FROM payroll
 WHERE pay_month = date_trunc('month', CURRENT_DATE)::DATE;
 
-\echo '--- (d) Trigger: salary change logged, allowance-only change is not ---'
+SELECT '--- (d) Trigger: salary change logged, allowance-only change is not ---' AS section;
 SELECT * FROM salary_audit ORDER BY audit_id;                             -- 1 row (5000 -> 5500)
 UPDATE employees SET allowance = 550.00 WHERE employee_id = 1;
 UPDATE employees SET basic_salary = basic_salary WHERE employee_id = 2;   -- unchanged
 SELECT COUNT(*) AS audit_rows_still_1 FROM salary_audit;
 
-\echo '--- (e) View includes history of inactive David ---'
+SELECT '--- (e) View includes history of inactive David ---' AS section;
 SELECT * FROM v_payroll_report ORDER BY pay_month, full_name;
 
-\echo '--- (f) EXPLAIN ---'
+SELECT '--- (f) EXPLAIN ---' AS section;
 SET enable_seqscan = off;
 EXPLAIN SELECT * FROM payroll WHERE pay_month = (date_trunc('month', CURRENT_DATE) - INTERVAL '1 month')::DATE;
 RESET enable_seqscan;
